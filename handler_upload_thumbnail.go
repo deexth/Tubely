@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -28,10 +29,65 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
 	// TODO: implement the upload here
+	const maxMemory = 10 << 20 // same as 10 * 1024 *1024
+	err = r.ParseMultipartForm(maxMemory)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong", fmt.Errorf("issue parsing multipartform: %v", err))
+		return
+	}
 
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	file, fileHeader, err := r.FormFile("thumbnail")
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "unable to parse form file", err)
+		return
+	}
+	defer file.Close()
+
+	fileContentType := fileHeader.Header.Get("Content-Type")
+
+	if fileContentType == "" {
+		respondWithError(w, http.StatusBadRequest, "Missing Content-Type for thumbnail", nil)
+		return
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong", fmt.Errorf("issue reading file: %v", err))
+		return
+	}
+
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong", err)
+		return
+	}
+
+	if video.ID == uuid.Nil {
+		respondWithError(w, http.StatusNotFound, "Video not found", nil)
+		return
+	}
+
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Not authorized", nil)
+		return
+	}
+
+	videoThumbnails[videoID] = thumbnail{
+		data:      data,
+		mediaType: fileContentType,
+	}
+
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, video.ID.String())
+	video.ThumbnailURL = &thumbnailURL
+
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong", fmt.Errorf("issue updating video in db: %v", err))
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
 }
